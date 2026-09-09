@@ -54,16 +54,25 @@ on:
 
       pod-publish-extensions:
         description: |
-          Publishes the specified extensions to CocoaPods.  
-          Pods will be published in the order they are listed.  
+          Publishes the specified extensions to CocoaPods.
+          Pods will be published in the order they are listed.
 
-          **Format:** A comma-separated list of extensions.  
-          **Syntax:** `"Extension1, Extension2, Extension3"`  
+          **Format:** A comma-separated list of extensions.
+          **Syntax:** `"Extension1, Extension2, Extension3"`
           **Example:** `"AEPCore, AEPIdentity"`
         type: string
         required: true
         default: ''
-      
+
+      publish-cocoapods:
+        description: |
+          Whether this repo still publishes to CocoaPods. When false, all CocoaPods-only
+          steps (installing CocoaPods, podspec verification, publishing to trunk) are skipped,
+          and dependency framework versions are resolved from Package.resolved instead of trunk.
+        type: boolean
+        required: false
+        default: true
+
       version-validation-name:
         description: |
           '(Optional) The name of the extension. Required if any regex patterns use a template that depends on the extension name. (ex: AEPLifecycle).'
@@ -145,14 +154,15 @@ jobs:
         xcodebuild -downloadPlatform iOS      
 
     - name: Install Cocoapods
+      if: ${{ inputs.publish-cocoapods }}
       run: gem install cocoapods
 
     - name: Install XcodeGen
       run: brew install xcodegen
 
     - name: Pod repo update
-      if: ${{ inputs.create-github-release != '' }}
-      run: | 
+      if: ${{ inputs.create-github-release != '' && inputs.publish-cocoapods }}
+      run: |
         pod repo update
 
     - name: SPM integration test
@@ -163,12 +173,12 @@ jobs:
         make test-SPM-integration
 
     - name: Podspec file verification
-      if: ${{ inputs.create-github-release != '' }}
+      if: ${{ inputs.create-github-release != '' && inputs.publish-cocoapods }}
       run: |
         set -eo pipefail
         echo podspec file verification starts:
         make test-podspec
-        
+
     - name: Build artifacts
       if: ${{ inputs.create-github-release != '' }}
       run: |
@@ -183,6 +193,7 @@ jobs:
         CREATE_GITHUB_RELEASE: ${{ inputs.create-github-release }}
         RELEASE_DEPENDENCY_FRAMEWORKS: ${{ inputs.release-dependency-frameworks }}
         TAG: ${{ inputs.tag }}
+        PUBLISH_COCOAPODS: ${{ inputs.publish-cocoapods }}
       run: |
         set -eo pipefail
 
@@ -209,9 +220,19 @@ jobs:
             DEP=$(echo "$DEP" | xargs)
             echo "Processing dependency: $DEP"
 
-            # Fetch version from CocoaPods
-            echo "Fetching version for dependency ${DEP}..."
-            DEP_VERSION=$(pod spec cat "${DEP}" | jq -r '.version')
+            if [ "$PUBLISH_COCOAPODS" = "true" ]; then
+              # Fetch version from CocoaPods
+              echo "Fetching version for dependency ${DEP}..."
+              DEP_VERSION=$(pod spec cat "${DEP}" | jq -r '.version')
+            else
+              # The repo-root Package.resolved can be a stale legacy (non-xcodebuild) manifest;
+              # the live one that `make archive` actually resolves against lives under xcshareddata/swiftpm
+              resolved_file=$(find . -iname "Package.resolved" -path "*xcshareddata/swiftpm*" -print -quit)
+              # Package.resolved keys pins by repo-slug identity (ex: AEPRulesEngine -> aepsdk-rulesengine-ios), not the extension name
+              dep_identity="aepsdk-$(echo "${DEP#AEP}" | tr '[:upper:]' '[:lower:]')-ios"
+              echo "Fetching version for dependency ${DEP} (identity: ${dep_identity}) from ${resolved_file}..."
+              DEP_VERSION=$(jq -r --arg id "$dep_identity" '.pins[] | select(.identity == $id) | .state.version' "$resolved_file")
+            fi
             echo "Fetched version for ${DEP}: ${DEP_VERSION}"
 
             # Append the file argument to FILE_ARGS
@@ -226,7 +247,7 @@ jobs:
           $FILE_ARGS
 
     - name: Publish pods
-      if: ${{ inputs.pod-publish-extensions != '' }}
+      if: ${{ inputs.pod-publish-extensions != '' && inputs.publish-cocoapods }}
       env:
         POD_PUBLISH_EXTENSIONS: ${{ inputs.pod-publish-extensions }}
         COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}

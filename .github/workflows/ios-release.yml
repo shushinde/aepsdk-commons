@@ -151,7 +151,8 @@ jobs:
     - name: Download iOS Simulator
       run: |
         xcrun simctl list > /dev/null
-        xcodebuild -downloadPlatform iOS      
+        xcodebuild -downloadPlatform iOS
+        xcodebuild -downloadPlatform tvOS
 
     - name: Install Cocoapods
       if: ${{ inputs.publish-cocoapods }}

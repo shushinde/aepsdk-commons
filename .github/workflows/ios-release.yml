@@ -226,13 +226,17 @@ jobs:
               echo "Fetching version for dependency ${DEP}..."
               DEP_VERSION=$(pod spec cat "${DEP}" | jq -r '.version')
             else
-              # The repo-root Package.resolved can be a stale legacy (non-xcodebuild) manifest;
-              # the live one that `make archive` actually resolves against lives under xcshareddata/swiftpm
-              resolved_file=$(find . -iname "Package.resolved" -path "*xcshareddata/swiftpm*" -print -quit)
-              # Package.resolved keys pins by repo-slug identity (ex: AEPRulesEngine -> aepsdk-rulesengine-ios), not the extension name
-              dep_identity="aepsdk-$(echo "${DEP#AEP}" | tr '[:upper:]' '[:lower:]')-ios"
-              echo "Fetching version for dependency ${DEP} (identity: ${dep_identity}) from ${resolved_file}..."
-              DEP_VERSION=$(jq -r --arg id "$dep_identity" '.pins[] | select(.identity == $id) | .state.version' "$resolved_file")
+              # SPM archive builds resolve dependencies straight from Package.swift into
+              # DerivedData's SourcePackages/checkouts (no repo-relative Package.resolved is
+              # guaranteed to exist), so read the version from the resolved checkout itself.
+              dep_slug=$(echo "${DEP#AEP}" | tr '[:upper:]' '[:lower:]')
+              checkout=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 6 -type d -ipath "*SourcePackages/checkouts*${dep_slug}*" -print -quit 2>/dev/null)
+              if [ -z "$checkout" ]; then
+                echo "::error title=Dependency checkout not found::Could not locate a resolved checkout for ${DEP} under DerivedData."
+                exit 1
+              fi
+              echo "Fetching version for dependency ${DEP} from resolved checkout at ${checkout}..."
+              DEP_VERSION=$(git -C "$checkout" describe --tags --abbrev=0)
             fi
             echo "Fetched version for ${DEP}: ${DEP_VERSION}"
 

@@ -31,7 +31,7 @@ name: z(Reusable) API Baseline Drift Check (iOS)
 # These can be passed using the `secrets: inherit` option in the caller workflow file.
 #
 # Accepted inputs (see each `description:` below for full detail):
-# - xcode-version           (default: '27')          Xcode version passed to setup-xcode.
+# - xcode-version           (default: '26')          Xcode version passed to setup-xcode.
 # - runner-image            (default: 'macos-26')     GitHub Actions runner image; must ship xcode-version.
 # - api-dump-command        (default: 'make api-dump') Command that regenerates the baseline in-place.
 # - api-baseline-path       (default: 'API/')          Path git-diffed/added to detect and commit drift.
@@ -47,7 +47,7 @@ on:
       xcode-version:
         description: 'The version of Xcode to use (passed to maxim-lobanov/setup-xcode).'
         type: string
-        default: '27'
+        default: '26'
 
       runner-image:
         description: |

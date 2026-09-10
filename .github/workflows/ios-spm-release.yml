@@ -23,7 +23,7 @@ name: z(Reusable) Release (iOS, SPM-only)
 # - version-validation-name          (optional)  Extension name for version-pattern templating.
 # - version-validation-paths         (optional)  Comma-separated file paths to validate; empty skips validation.
 # - version-validation-dependencies  (optional)  Comma-separated dependency versions to validate.
-# - xcode-version                    (default: '27')      Xcode version passed to setup-xcode.
+# - xcode-version                    (default: '26')      Xcode version passed to setup-xcode.
 # - runner-image                     (default: 'macos-26') GitHub Actions runner image; must ship xcode-version.
 # - simulator-platforms              (default: 'iOS')      Comma-separated platforms to pre-download simulators for.
 # - extra-brew-packages              (optional)  Extra Homebrew packages, on top of xcodegen + swiftlint.
@@ -109,7 +109,7 @@ on:
       xcode-version:
         description: 'The version of Xcode to use (passed to maxim-lobanov/setup-xcode).'
         type: string
-        default: '27'
+        default: '26'
 
       runner-image:
         description: |

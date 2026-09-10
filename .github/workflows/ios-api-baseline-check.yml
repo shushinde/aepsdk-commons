@@ -31,7 +31,7 @@ name: z(Reusable) API Baseline Drift Check (iOS)
 # These can be passed using the `secrets: inherit` option in the caller workflow file.
 #
 # Accepted inputs (see each `description:` below for full detail):
-# - xcode-version           (default: '26.0.0')      Xcode version passed to setup-xcode. Pinned exact
+# - xcode-version           (default: '26.6.0')      Xcode version passed to setup-xcode. Pinned exact
 #                                                     to match the version other CI (e.g. CircleCI)
 #                                                     pins, so the regenerated baseline doesn't drift.
 # - runner-image            (default: 'macos-26')     GitHub Actions runner image; must ship xcode-version.
@@ -49,7 +49,7 @@ on:
       xcode-version:
         description: 'The version of Xcode to use (passed to maxim-lobanov/setup-xcode).'
         type: string
-        default: '26.0.0'
+        default: '26.6.0'
 
       runner-image:
         description: |

@@ -1,0 +1,372 @@
+#
+# Copyright 2026 Adobe. All rights reserved.
+# This file is licensed to you under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License. You may obtain a copy
+# of the License at http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software distributed under
+# the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+# OF ANY KIND, either express or implied. See the License for the specific language
+# governing permissions and limitations under the License.
+#
+
+name: z(Reusable) Release (iOS, SPM-only)
+
+# This workflow relies on the following secrets:
+# - GITHUB_TOKEN: With the permission scope: `contents: write`. Required for creating a release on GitHub.
+# These can be passed using the `secrets: inherit` option in the caller workflow file.
+#
+# Accepted inputs (see each `description:` below for full detail):
+# - tag                              (required)  The version to release (ex: 1.2.3).
+# - create-github-release            (required)  Comma-separated extensions to release; empty skips build/release.
+# - release-dependency-frameworks    (optional)  Comma-separated dependency frameworks to also attach.
+# - version-validation-name          (optional)  Extension name for version-pattern templating.
+# - version-validation-paths         (optional)  Comma-separated file paths to validate; empty skips validation.
+# - version-validation-dependencies  (optional)  Comma-separated dependency versions to validate.
+# - xcode-version                    (default: '27')      Xcode version passed to setup-xcode.
+# - runner-image                     (default: 'macos-26') GitHub Actions runner image; must ship xcode-version.
+# - simulator-platforms              (default: 'iOS')      Comma-separated platforms to pre-download simulators for.
+# - extra-brew-packages              (optional)  Extra Homebrew packages, on top of xcodegen + swiftlint.
+# - run-spm-integration-test         (default: true)       Toggle for `make test-SPM-integration`.
+# - dependency-version-strategy      (default: 'git-describe') 'git-describe' or 'package-resolved'.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: |
+          The tag (version) to be released (ex: 1.2.3).
+        type: string
+        required: true
+
+      create-github-release:
+        description: |
+          Creates a single GitHub release and uploads artifacts for the specified extensions.
+          If the provided `tag` does not exist, it will be created.
+          If left empty, the build/test/release steps below are all skipped and only
+          version validation runs (useful for dry-run / validation-only dispatches).
+
+          **Format:** A comma-separated list of extensions.
+          **Syntax:** `"Extension1, Extension2, Extension3"`
+          **Example:** `"AEPServices, AEPCore"`
+        type: string
+        required: true
+        default: ''
+
+      release-dependency-frameworks:
+        description: |
+          A comma-separated list of extension frameworks to include as artifacts in the GitHub
+          release, in addition to the ones in `create-github-release`. Their versions are read
+          from the resolved SPM checkout (see `dependency-version-strategy`), not from the `tag`
+          input, since dependencies version independently from the repo being released.
+
+          **Format:** A comma-separated list of extensions.
+          **Syntax:** `"Dependency1, Dependency2"`
+          **Example:** `"AEPRulesEngine"`
+        type: string
+        required: false
+        default: ''
+
+      version-validation-name:
+        description: |
+          '(Optional) The name of the extension. Required if any regex patterns use a template that depends on the extension name. (ex: AEPLifecycle).'
+        type: string
+        default: ''
+
+      version-validation-paths:
+        description: |
+          A comma-separated list of absolute and/or relative file paths to validate.
+          Each path can optionally specify a pattern type using the syntax:
+
+          **Syntax:** `path[:file_type]`
+
+          **Example:**
+          `"Package.swift:swift_spm, AEPCore/Sources/configuration/ConfigurationConstants.swift, AEPCore/Tests/MobileCoreTests.swift:swift_test_version"`
+
+          Optional: if left empty, version validation is skipped (no paths to check).
+        type: string
+        required: false
+        default: ''
+
+      version-validation-dependencies:
+        description: |
+          A comma-separated list of dependencies with their versions.
+          Each dependency can optionally specify a semicolon-separated list of the file paths where it applies using the `@` symbol.
+
+          **Syntax:** `<name> <version>[@file_path1[;file_path2;...]]`
+
+          - If the `@` syntax is used, the dependency will only apply to the specified files.
+          - If the `@` symbol is omitted, the dependency applies to all relevant files.
+          - When specifying custom file paths, you must provide either an absolute or relative path to each file.
+          - If a dependency is missing a version, it will be skipped.
+
+          **Example:**
+          `"AEPCore 3.1.1, AEPServices 8.9.10@Package.swift:swift_spm"`
+        type: string
+        required: false
+        default: ''
+
+      xcode-version:
+        description: 'The version of Xcode to use (passed to maxim-lobanov/setup-xcode).'
+        type: string
+        default: '27'
+
+      runner-image:
+        description: |
+          Which GitHub Actions runner image to use. Must have the requested `xcode-version`
+          preinstalled (see https://github.com/actions/runner-images for what each image ships).
+        type: string
+        default: 'macos-26'
+
+      simulator-platforms:
+        description: |
+          A comma-separated list of simulator platforms to download via `xcodebuild -downloadPlatform`
+          before building, matching whatever platforms this repo's targets/tests build for.
+
+          **Format:** A comma-separated list of Apple platform names accepted by `-downloadPlatform`.
+          **Example:** `"iOS, tvOS"` (default) or `"iOS, tvOS, watchOS, visionOS"`.
+          Set to an empty string to skip platform downloads entirely (e.g. macOS-only targets).
+        type: string
+        default: 'iOS'
+
+      extra-brew-packages:
+        description: |
+          A comma-separated list of additional Homebrew packages to install before building,
+          on top of the always-installed `xcodegen` and `swiftlint`.
+
+          **Example:** `"jq"`
+        type: string
+        default: ''
+
+      run-spm-integration-test:
+        description: |
+          Whether to run `make test-SPM-integration` before building artifacts. Requires the
+          repo's Makefile to define that target. Skip for repos without an SPM integration test.
+        type: boolean
+        default: true
+
+      dependency-version-strategy:
+        description: |
+          How to determine the version string used to name dependency framework zips listed in
+          `release-dependency-frameworks`:
+          - `git-describe` (default): reads the version from the resolved SPM checkout under
+            DerivedData via `git describe --tags --abbrev=0`. Works for any repo built via
+            `xcodebuild archive -scheme <name>` (no `.xcodeproj`/`.xcworkspace` flag), which is
+            how `make archive` resolves packages for most AEP iOS repos.
+          - `package-resolved`: reads the version from a repo-relative
+            `**/xcshareddata/swiftpm/Package.resolved` file instead. Only use this if your repo's
+            build actually produces that file (i.e. `xcodebuild` is invoked against an
+            `.xcodeproj`/`.xcworkspace`, not a bare scheme).
+        type: string
+        default: 'git-describe'
+
+    secrets:
+      GITHUB_TOKEN:
+        required: false
+
+# Prevents two dispatches for the same tag from racing each other (e.g. duplicate/partial
+# releases from an accidental double-trigger). Scoped per-tag so unrelated releases in the
+# same repo can still run concurrently.
+concurrency:
+  group: ios-release-spm-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Warn on inputs that will have no effect
+      if: ${{ inputs.create-github-release == '' && inputs.release-dependency-frameworks != '' }}
+      run: |
+        echo "::warning title=release-dependency-frameworks ignored::'release-dependency-frameworks' (${{ inputs.release-dependency-frameworks }}) was set, but 'create-github-release' is empty, so the entire build/release job is skipped and no dependency artifacts will be released."
+
+  validate-versions:
+    name: Validate Versions
+    uses: shushinde/aepsdk-commons/.github/workflows/versions.yml@main
+    with:
+      name: ${{ inputs.version-validation-name }}
+      version: ${{ inputs.tag }}
+      branch: main
+      paths: ${{ inputs.version-validation-paths }}
+      dependencies: ${{ inputs.version-validation-dependencies }}
+      update: false
+
+  release:
+    name: Build and Release
+    runs-on: ${{ inputs.runner-image }}
+    needs: validate-versions
+    if: ${{ inputs.create-github-release != '' }}
+    steps:
+    - uses: actions/checkout@v7.0.1
+      with:
+        ref: main
+
+    - name: Set up Xcode Version
+      uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+      with:
+        xcode-version: ${{ inputs.xcode-version }}
+
+    - name: Download simulator platforms
+      if: ${{ inputs.simulator-platforms != '' }}
+      env:
+        SIMULATOR_PLATFORMS: ${{ inputs.simulator-platforms }}
+      run: |
+        set -eo pipefail
+        xcrun simctl list > /dev/null
+
+        IFS=',' read -ra PLATFORMS <<< "${SIMULATOR_PLATFORMS}"
+        for PLATFORM in "${PLATFORMS[@]}"; do
+          PLATFORM=$(echo "$PLATFORM" | xargs)
+          [ -z "$PLATFORM" ] && continue
+          echo "Downloading simulator platform: ${PLATFORM}"
+          if ! xcodebuild -downloadPlatform "$PLATFORM"; then
+            echo "::error title=Platform download failed::Could not download simulator platform '${PLATFORM}'. Check that the name matches what 'xcodebuild -downloadPlatform' expects (e.g. iOS, tvOS, watchOS, visionOS)."
+            exit 1
+          fi
+        done
+
+    - name: Install build tools (Homebrew)
+      env:
+        EXTRA_BREW_PACKAGES: ${{ inputs.extra-brew-packages }}
+      run: |
+        set -eo pipefail
+        BREW_PACKAGES=("xcodegen" "swiftlint")
+
+        if [ -n "${EXTRA_BREW_PACKAGES}" ]; then
+          IFS=',' read -ra EXTRA <<< "${EXTRA_BREW_PACKAGES}"
+          for PKG in "${EXTRA[@]}"; do
+            PKG=$(echo "$PKG" | xargs)
+            [ -n "$PKG" ] && BREW_PACKAGES+=("$PKG")
+          done
+        fi
+
+        echo "Installing: ${BREW_PACKAGES[*]}"
+        brew install "${BREW_PACKAGES[@]}"
+
+    - name: SPM integration test
+      if: ${{ inputs.run-spm-integration-test }}
+      run: |
+        set -eo pipefail
+        if ! grep -qE '^test-SPM-integration:' Makefile 2>/dev/null; then
+          echo "::error title=Missing Makefile target::'run-spm-integration-test' is true but no 'test-SPM-integration' target was found in the Makefile. Set the input to false to skip, or add the target."
+          exit 1
+        fi
+        echo "Running SPM integration test..."
+        make test-SPM-integration
+
+    - name: Build artifacts
+      run: |
+        set -eo pipefail
+        echo "Archiving and zipping artifacts..."
+        make archive
+        make zip
+
+    - name: Create GitHub release and upload assets
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        CREATE_GITHUB_RELEASE: ${{ inputs.create-github-release }}
+        RELEASE_DEPENDENCY_FRAMEWORKS: ${{ inputs.release-dependency-frameworks }}
+        TAG: ${{ inputs.tag }}
+        DEPENDENCY_VERSION_STRATEGY: ${{ inputs.dependency-version-strategy }}
+      run: |
+        set -eo pipefail
+
+        FILE_ARGS=""
+
+        # Verify every artifact we're about to attach was actually produced by `make zip`,
+        # so a silent build gap fails loudly here instead of surfacing as a confusing
+        # "gh release create" error deep in its own output.
+        require_artifact() {
+          local path="$1"
+          if [ ! -f "$path" ]; then
+            echo "::error title=Missing build artifact::Expected artifact '${path}' was not found. Check that 'make archive'/'make zip' produced it."
+            exit 1
+          fi
+        }
+
+        IFS=',' read -ra LIBS <<< "${CREATE_GITHUB_RELEASE}"
+        for LIB in "${LIBS[@]}"; do
+          LIB=$(echo "$LIB" | xargs)
+          [ -z "$LIB" ] && continue
+          ARTIFACT="./build/${LIB}.xcframework.zip"
+          require_artifact "$ARTIFACT"
+          FILE_ARGS="$FILE_ARGS ${ARTIFACT}#${LIB}-${TAG}.xcframework.zip"
+        done
+
+        if [ -n "${RELEASE_DEPENDENCY_FRAMEWORKS}" ]; then
+          IFS=',' read -ra DEPS <<< "${RELEASE_DEPENDENCY_FRAMEWORKS}"
+          for DEP in "${DEPS[@]}"; do
+            DEP=$(echo "$DEP" | xargs)
+            [ -z "$DEP" ] && continue
+            echo "Resolving version for dependency: ${DEP}"
+
+            case "$DEPENDENCY_VERSION_STRATEGY" in
+              git-describe)
+                # SPM archive builds (xcodebuild archive -scheme <name>, no -workspace/-project)
+                # resolve packages straight from Package.swift into DerivedData's
+                # SourcePackages/checkouts, not into a repo-relative Package.resolved, so we
+                # read the version from the resolved checkout itself.
+                if [[ "$DEP" != AEP* ]]; then
+                  echo "::error title=Unsupported dependency naming::'${DEP}' does not start with 'AEP', so its resolved checkout directory (expected pattern 'aepsdk-<name>-ios') cannot be derived. This strategy only supports AEP-prefixed dependencies; use 'package-resolved' or rename the dependency."
+                  exit 1
+                fi
+                dep_slug=$(echo "${DEP#AEP}" | tr '[:upper:]' '[:lower:]')
+                # Anchor on the expected repo-slug directory name (aepsdk-<slug>-ios) rather
+                # than a bare substring match, so a checkout whose name merely contains this
+                # slug (e.g. a differently-prefixed sibling dependency) can't be picked by
+                # accident and silently mislabel the release asset's version.
+                checkout=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 6 -type d -ipath "*SourcePackages/checkouts/aepsdk-${dep_slug}-ios" -print -quit 2>/dev/null)
+                if [ -z "$checkout" ]; then
+                  echo "::error title=Dependency checkout not found::Could not locate a resolved checkout directory named 'aepsdk-${dep_slug}-ios' under DerivedData for '${DEP}'. Verify the dependency is actually declared in Package.swift and that 'make archive' ran before this step."
+                  exit 1
+                fi
+                DEP_VERSION=$(git -C "$checkout" describe --tags --abbrev=0 2>/dev/null) || {
+                  echo "::error title=No tag found for dependency::'git describe' found no tag in the resolved checkout for '${DEP}' at ${checkout}."
+                  exit 1
+                }
+                ;;
+              package-resolved)
+                resolved_file=$(find . -iname "Package.resolved" -path "*xcshareddata/swiftpm*" -print -quit)
+                if [ -z "$resolved_file" ]; then
+                  echo "::error title=Package.resolved not found::dependency-version-strategy is 'package-resolved' but no '**/xcshareddata/swiftpm/Package.resolved' file was found. Use 'git-describe' instead if this repo's build doesn't produce that file."
+                  exit 1
+                fi
+                dep_identity="aepsdk-$(echo "${DEP#AEP}" | tr '[:upper:]' '[:lower:]')-ios"
+                DEP_VERSION=$(jq -r --arg id "$dep_identity" '.pins[] | select(.identity == $id) | .state.version' "$resolved_file")
+                if [ -z "$DEP_VERSION" ] || [ "$DEP_VERSION" = "null" ]; then
+                  echo "::error title=Dependency not found in Package.resolved::No pin with identity '${dep_identity}' found in ${resolved_file}."
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "::error title=Invalid dependency-version-strategy::'${DEPENDENCY_VERSION_STRATEGY}' is not a recognized strategy. Use 'git-describe' or 'package-resolved'."
+                exit 1
+                ;;
+            esac
+
+            echo "Resolved ${DEP} to version ${DEP_VERSION}"
+            ARTIFACT="./build/${DEP}.xcframework.zip"
+            require_artifact "$ARTIFACT"
+            FILE_ARGS="$FILE_ARGS ${ARTIFACT}#${DEP}-${DEP_VERSION}.xcframework.zip"
+          done
+        fi
+
+        if [ -z "$FILE_ARGS" ]; then
+          echo "::error title=No release assets::No artifacts were resolved to attach to the release. Check 'create-github-release' and 'release-dependency-frameworks' inputs."
+          exit 1
+        fi
+
+        # Re-running after a partial failure (e.g. release created but an asset upload failed)
+        # would otherwise hard-fail here since the release/tag already exists. Fall back to
+        # uploading assets to the existing release with --clobber instead of erroring out.
+        if gh release view "$TAG" > /dev/null 2>&1; then
+          echo "Release ${TAG} already exists; uploading assets with --clobber instead of creating it fresh."
+          gh release upload "$TAG" $FILE_ARGS --clobber
+        else
+          echo "Creating GitHub release ${TAG} with assets:${FILE_ARGS}"
+          gh release create "$TAG" \
+            --generate-notes \
+            --title "v$TAG" \
+            $FILE_ARGS
+        fi

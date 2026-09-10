@@ -1,0 +1,235 @@
+#
+# Copyright 2026 Adobe. All rights reserved.
+# This file is licensed to you under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License. You may obtain a copy
+# of the License at http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software distributed under
+# the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+# OF ANY KIND, either express or implied. See the License for the specific language
+# governing permissions and limitations under the License.
+#
+
+name: z(Reusable) API Baseline Drift Check (iOS)
+
+# Runs the repo's API-dump command fresh on every push to a PR (against any base branch) and
+# compares it against the committed API baseline directory. If there's no diff, nothing
+# happens. If there is a diff, the regenerated baseline is committed and pushed directly to
+# the PR's branch, and a PR comment is posted explaining what changed.
+#
+# Only pushes when the PR's head branch lives in this same repo (not an external fork, where
+# GITHUB_TOKEN cannot push) — for fork PRs it falls back to comment-only.
+#
+# The commit this workflow pushes still runs through this same check (no [skip ci]), so it
+# gets a real, visible passing status instead of no status at all. The check recognizes its
+# own prior commit early (by commit author) and exits successfully without redoing the
+# expensive work, which also means it never produces a second commit and can't loop.
+#
+# This workflow relies on the following secrets:
+# - GITHUB_TOKEN: With the permission scopes `contents: write` and `pull-requests: write`.
+#   Required to push the regenerated baseline and to comment on the PR.
+# These can be passed using the `secrets: inherit` option in the caller workflow file.
+#
+# Accepted inputs (see each `description:` below for full detail):
+# - xcode-version           (default: '27')          Xcode version passed to setup-xcode.
+# - runner-image            (default: 'macos-26')     GitHub Actions runner image; must ship xcode-version.
+# - api-dump-command        (default: 'make api-dump') Command that regenerates the baseline in-place.
+# - api-baseline-path       (default: 'API/')          Path git-diffed/added to detect and commit drift.
+# - pr-number, head-sha, head-ref, head-repo (all optional, default '')
+#     Only needed when this workflow is driven by something other than a native
+#     `pull_request` event (e.g. an `issue_comment` "/recheck" trigger resolved by the
+#     caller), since those events don't carry PR head info. Leave unset for a normal
+#     pull_request-triggered call.
+
+on:
+  workflow_call:
+    inputs:
+      xcode-version:
+        description: 'The version of Xcode to use (passed to maxim-lobanov/setup-xcode).'
+        type: string
+        default: '27'
+
+      runner-image:
+        description: |
+          Which GitHub Actions runner image to use. Must have the requested `xcode-version`
+          preinstalled (see https://github.com/actions/runner-images for what each image ships).
+        type: string
+        default: 'macos-26'
+
+      api-dump-command:
+        description: |
+          The shell command that regenerates the API baseline in-place (writing under
+          `api-baseline-path`). Must be runnable directly from the repo root after checkout.
+        type: string
+        default: 'make api-dump'
+
+      api-baseline-path:
+        description: |
+          The path (file or directory) containing the committed API baseline. This is what
+          gets `git diff`'d after running `api-dump-command`, and `git add`'d when committing
+          a regenerated baseline.
+        type: string
+        default: 'API/'
+
+      bot-user-name:
+        description: 'Git author name used for the auto-commit that pushes a regenerated baseline.'
+        type: string
+        default: 'github-actions[bot]'
+
+      bot-user-email:
+        description: |
+          Git author email used for the auto-commit, and also the identity this workflow
+          checks the head commit against to recognize (and skip re-processing) its own prior
+          commit, preventing an infinite commit loop.
+        type: string
+        default: 'github-actions[bot]@users.noreply.github.com'
+
+      # The following four are only needed when this workflow is driven by something other
+      # than a native `pull_request` event (e.g. an `issue_comment` "/recheck" trigger
+      # resolved by the caller), since those events don't carry PR head info. Leave unset for
+      # a normal pull_request-triggered call.
+      pr-number:
+        description: '(Optional) PR number, for non-pull_request triggers. Falls back to github.event.pull_request.number.'
+        type: string
+        default: ''
+      head-sha:
+        description: '(Optional) PR head commit SHA to check out, for non-pull_request triggers. Falls back to github.event.pull_request.head.sha.'
+        type: string
+        default: ''
+      head-ref:
+        description: '(Optional) PR head branch name to push to, for non-pull_request triggers. Falls back to github.event.pull_request.head.ref.'
+        type: string
+        default: ''
+      head-repo:
+        description: '(Optional) PR head repo full name (owner/repo), for non-pull_request triggers. Falls back to github.event.pull_request.head.repo.full_name.'
+        type: string
+        default: ''
+
+jobs:
+  check-api-baseline:
+    name: Check API Baseline Drift
+    runs-on: ${{ inputs.runner-image }}
+    if: github.event_name == 'pull_request' || inputs.pr-number != ''
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ inputs.pr-number != '' && inputs.pr-number || github.event.pull_request.number }}
+      HEAD_SHA: ${{ inputs.head-sha != '' && inputs.head-sha || github.event.pull_request.head.sha }}
+      HEAD_REF: ${{ inputs.head-ref != '' && inputs.head-ref || github.event.pull_request.head.ref }}
+      HEAD_REPO: ${{ inputs.head-repo != '' && inputs.head-repo || github.event.pull_request.head.repo.full_name }}
+      API_DUMP_COMMAND: ${{ inputs.api-dump-command }}
+      API_BASELINE_PATH: ${{ inputs.api-baseline-path }}
+      BOT_USER_NAME: ${{ inputs.bot-user-name }}
+      BOT_USER_EMAIL: ${{ inputs.bot-user-email }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+
+      - name: Check whether this is our own prior commit
+        id: self-commit
+        run: |
+          set -eo pipefail
+          AUTHOR_EMAIL=$(git log -1 --pretty=%ae)
+          if [ "$AUTHOR_EMAIL" = "${BOT_USER_EMAIL}" ]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+            echo "Head commit was authored by this check itself, nothing new to verify. Passing."
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Xcode Version
+        if: steps.self-commit.outputs.value == 'false'
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: ${{ inputs.xcode-version }}
+
+      - name: Regenerate API dump (working copy only, not committed yet)
+        if: steps.self-commit.outputs.value == 'false'
+        run: |
+          set -eo pipefail
+          if ! eval "${API_DUMP_COMMAND}"; then
+            echo "::error title=API dump command failed::'${API_DUMP_COMMAND}' did not complete successfully. Check that this command exists and runs cleanly from the repo root."
+            exit 1
+          fi
+
+      - name: Check for drift
+        id: diff
+        if: steps.self-commit.outputs.value == 'false'
+        run: |
+          set -eo pipefail
+          if git diff --quiet -- "${API_BASELINE_PATH}"; then
+            echo "has-diff=false" >> "$GITHUB_OUTPUT"
+            echo "No API baseline drift detected. Nothing to commit."
+          else
+            echo "has-diff=true" >> "$GITHUB_OUTPUT"
+            git diff --stat -- "${API_BASELINE_PATH}"
+            git diff -- "${API_BASELINE_PATH}" > /tmp/api-baseline.diff
+            echo "API baseline drift detected."
+          fi
+
+      - name: Determine whether we can push to the PR branch
+        id: can-push
+        if: steps.self-commit.outputs.value == 'false'
+        run: |
+          set -eo pipefail
+          if [ "${HEAD_REPO}" = "${{ github.repository }}" ]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+            echo "PR head is in a fork (${HEAD_REPO}); cannot push, will comment only."
+          fi
+
+      - name: Commit and push regenerated baseline to PR branch
+        id: commit
+        if: steps.self-commit.outputs.value == 'false' && steps.diff.outputs.has-diff == 'true' && steps.can-push.outputs.value == 'true'
+        run: |
+          set -eo pipefail
+          git config user.name "${BOT_USER_NAME}"
+          git config user.email "${BOT_USER_EMAIL}"
+          git add "${API_BASELINE_PATH}"
+          git commit -m "chore: regenerate API baseline (Xcode ${{ inputs.xcode-version }})"
+          git push origin HEAD:"${HEAD_REF}"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on PR
+        if: steps.self-commit.outputs.value == 'false' && steps.diff.outputs.has-diff == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+
+          DIFF_PREVIEW=$(head -c 60000 /tmp/api-baseline.diff)
+
+          {
+            echo "## API baseline updated"
+            echo
+            if [ "${{ steps.can-push.outputs.value }}" = "true" ]; then
+              echo "This PR changes the public API surface, or the Xcode toolchain used to"
+              echo "build it changed, so the recorded API baseline no longer matched what"
+              echo "\`${API_DUMP_COMMAND}\` produces. I went ahead and refreshed it for you, and"
+              echo "pushed that update straight to this branch as commit"
+              echo "\`${{ steps.commit.outputs.sha }}\`."
+              echo
+              echo "Take a look at the diff below. If everything looks like what you'd"
+              echo "expect from your change, you're all set. If something looks off, that's"
+              echo "usually a sign the code itself needs a second look rather than the"
+              echo "baseline."
+            else
+              echo "This PR's branch lives in a fork, so I wasn't able to push the updated"
+              echo "baseline myself. Could you run \`${API_DUMP_COMMAND}\` locally and commit the"
+              echo "result? That'll bring the baseline back in sync."
+            fi
+            echo
+            echo "<details><summary>See what changed</summary>"
+            echo
+            echo '```diff'
+            echo "$DIFF_PREVIEW"
+            echo '```'
+            echo "</details>"
+          } > /tmp/pr-comment.md
+
+          gh pr comment "${PR_NUMBER}" \
+            --repo "${{ github.repository }}" \
+            --body-file /tmp/pr-comment.md

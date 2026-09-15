@@ -42,10 +42,6 @@ on:
         description: 'Which simulator variables to set: ios or tvos.'
         type: string
         default: 'ios'
-      result-bundle-path:
-        description: 'Path to the xcresult bundle. Enables coverage parsing when set.'
-        type: string
-        default: ''
       enable-codecov:
         type: boolean
         default: false
@@ -75,15 +71,29 @@ jobs:
           fi
 
       - name: Parse xcresult into coverage report
-        if: ${{ always() && inputs.enable-codecov && inputs.result-bundle-path != '' }}
+        if: ${{ always() && inputs.enable-codecov }}
         continue-on-error: true
         run: |
           brew install xcresultparser
           mkdir -p ./build/coverage
-          xcresultparser --output-format cobertura "${{ inputs.result-bundle-path }}" > ./build/coverage/coverage.xml
+          # Auto-discover the .xcresult produced by the test command (the repo's Makefile
+          # decides its name/location under build/), so nothing here is repo-specific.
+          RESULT_FILES=$(find build -name "*.xcresult" 2>/dev/null || true)
+          if [ -z "$RESULT_FILES" ]; then
+            echo "No .xcresult bundle found under build/; skipping coverage."
+            exit 0
+          fi
+          if [ "$(echo "$RESULT_FILES" | wc -w | tr -d ' ')" -gt 1 ]; then
+            MERGE_CMD="xcrun xccov merge --output ./build/Merged.xcresult"
+            for f in $RESULT_FILES; do MERGE_CMD="$MERGE_CMD $f"; done
+            eval "$MERGE_CMD"
+            xcresultparser --output-format cobertura ./build/Merged.xcresult > ./build/coverage/coverage.xml
+          else
+            xcresultparser --output-format cobertura "$RESULT_FILES" > ./build/coverage/coverage.xml
+          fi
 
       - name: Upload coverage to Codecov
-        if: ${{ always() && inputs.enable-codecov && inputs.result-bundle-path != '' }}
+        if: ${{ always() && inputs.enable-codecov }}
         continue-on-error: true
         uses: codecov/codecov-action@13ce06bfc6bbe3ecf90edbbf1bc32fe5978ca1d3 # v5.3.1
         with:

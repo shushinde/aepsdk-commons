@@ -78,7 +78,6 @@ jobs:
       platform: ios
       device-name: ${{ inputs.ios-device-name }}
       os-version: ${{ inputs.ios-version }}
-      result-bundle-path: build/AEPUnitTests-ios.xcresult
       enable-codecov: ${{ inputs.enable-codecov }}
       codecov-flag: ios-unit-tests
     secrets: inherit
@@ -95,7 +94,6 @@ jobs:
       platform: tvos
       device-name: ${{ inputs.tvos-device-name }}
       os-version: ${{ inputs.tvos-version }}
-      result-bundle-path: build/AEPUnitTests-tvos.xcresult
       enable-codecov: ${{ inputs.enable-codecov }}
       codecov-flag: tvos-unit-tests
     secrets: inherit

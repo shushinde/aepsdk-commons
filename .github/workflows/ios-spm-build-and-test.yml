@@ -1,0 +1,146 @@
+#
+# Copyright 2026 Adobe. All rights reserved.
+# This file is licensed to you under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License. You may obtain a copy
+# of the License at http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software distributed under
+# the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+# OF ANY KIND, either express or implied. See the License for the specific language
+# governing permissions and limitations under the License.
+#
+
+name: z(Reusable) Build and Test (iOS SPM)
+
+# Pure-SPM build/test pipeline. Validates the API surface, then runs the requested
+# Xcode Test Plans on iOS/tvOS simulators. Lint runs automatically via the SwiftLint
+# build-tool plugin during each xcodebuild, so there is no separate lint job.
+
+on:
+  workflow_call:
+    inputs:
+      runner-image:
+        type: string
+        default: 'macos-15'
+      xcode-version:
+        description: "The version of Xcode to use. If not provided, the runner's default version is used."
+        type: string
+        default: ''
+      ios-device-name:
+        type: string
+        default: 'iPhone 16'
+      ios-version:
+        type: string
+        default: '18.6'
+      tvos-device-name:
+        type: string
+        default: 'Apple TV'
+      tvos-version:
+        type: string
+        default: '18.5'
+      # Which test plans to run
+      run-test-ios-unit:
+        type: boolean
+        default: false
+      run-test-tvos-unit:
+        type: boolean
+        default: false
+      run-test-ios-integration:
+        type: boolean
+        default: false
+      run-test-tvos-integration:
+        type: boolean
+        default: false
+      run-build-xcframework:
+        type: boolean
+        default: false
+      enable-codecov:
+        type: boolean
+        default: false
+
+jobs:
+  validate-code:
+    name: Validate Code
+    uses: shushinde/aepsdk-commons/.github/workflows/ios-spm-validate-code.yml@main
+    with:
+      runner-image: ${{ inputs.runner-image }}
+      xcode-version: ${{ inputs.xcode-version }}
+
+  test-ios-unit:
+    name: Unit Test (iOS)
+    needs: validate-code
+    if: inputs.run-test-ios-unit
+    uses: shushinde/aepsdk-commons/.github/workflows/ios-spm-custom-command-build-and-test.yml@main
+    with:
+      runner-image: ${{ inputs.runner-image }}
+      xcode-version: ${{ inputs.xcode-version }}
+      command: make unit-test-ios
+      platform: ios
+      device-name: ${{ inputs.ios-device-name }}
+      os-version: ${{ inputs.ios-version }}
+      result-bundle-path: build/AEPUnitTests-ios.xcresult
+      enable-codecov: ${{ inputs.enable-codecov }}
+      codecov-flag: ios-unit-tests
+    secrets: inherit
+
+  test-tvos-unit:
+    name: Unit Test (tvOS)
+    needs: validate-code
+    if: inputs.run-test-tvos-unit
+    uses: shushinde/aepsdk-commons/.github/workflows/ios-spm-custom-command-build-and-test.yml@main
+    with:
+      runner-image: ${{ inputs.runner-image }}
+      xcode-version: ${{ inputs.xcode-version }}
+      command: make unit-test-tvos
+      platform: tvos
+      device-name: ${{ inputs.tvos-device-name }}
+      os-version: ${{ inputs.tvos-version }}
+      result-bundle-path: build/AEPUnitTests-tvos.xcresult
+      enable-codecov: ${{ inputs.enable-codecov }}
+      codecov-flag: tvos-unit-tests
+    secrets: inherit
+
+  test-ios-integration:
+    name: Integration Test (iOS)
+    needs: validate-code
+    if: inputs.run-test-ios-integration
+    uses: shushinde/aepsdk-commons/.github/workflows/ios-spm-custom-command-build-and-test.yml@main
+    with:
+      runner-image: ${{ inputs.runner-image }}
+      xcode-version: ${{ inputs.xcode-version }}
+      command: make integration-test-ios
+      platform: ios
+      device-name: ${{ inputs.ios-device-name }}
+      os-version: ${{ inputs.ios-version }}
+    secrets: inherit
+
+  test-tvos-integration:
+    name: Integration Test (tvOS)
+    needs: validate-code
+    if: inputs.run-test-tvos-integration
+    uses: shushinde/aepsdk-commons/.github/workflows/ios-spm-custom-command-build-and-test.yml@main
+    with:
+      runner-image: ${{ inputs.runner-image }}
+      xcode-version: ${{ inputs.xcode-version }}
+      command: make integration-test-tvos
+      platform: tvos
+      device-name: ${{ inputs.tvos-device-name }}
+      os-version: ${{ inputs.tvos-version }}
+    secrets: inherit
+
+  build-xcframework:
+    name: Build XCFramework
+    runs-on: ${{ inputs.runner-image }}
+    needs: validate-code
+    if: inputs.run-build-xcframework
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Dependencies
+        uses: shushinde/aepsdk-commons/.github/actions/ios-spm-setup-dependencies-action@main
+        with:
+          xcode-version: ${{ inputs.xcode-version }}
+
+      - name: Build XCFramework
+        run: make archive

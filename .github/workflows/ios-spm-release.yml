@@ -160,6 +160,18 @@ on:
         type: string
         default: 'git-describe'
 
+      tag-only:
+        description: |
+          When true, create the GitHub release/tag WITHOUT building or attaching any binary
+          artifacts (the "Build artifacts" step and all asset resolution/upload are skipped).
+          Use this for source-only Swift packages — SPM consumers build from source via the
+          git tag, so no XCFramework is needed — and for libraries that cannot be built as a
+          distributable XCFramework at all (e.g. test utilities that subclass XCTest or reach
+          into `@testable`/non-open internals, which have no valid distribution module interface).
+          `create-github-release` must still be non-empty so this job runs.
+        type: boolean
+        default: false
+
 # Prevents two dispatches for the same tag from racing each other (e.g. duplicate/partial
 # releases from an accidental double-trigger). Scoped per-tag so unrelated releases in the
 # same repo can still run concurrently.
@@ -252,6 +264,7 @@ jobs:
         make test-SPM-integration
 
     - name: Build artifacts
+      if: ${{ !inputs.tag-only }}
       run: |
         set -eo pipefail
         echo "Archiving and zipping artifacts..."
@@ -265,8 +278,22 @@ jobs:
         RELEASE_DEPENDENCY_FRAMEWORKS: ${{ inputs.release-dependency-frameworks }}
         TAG: ${{ inputs.tag }}
         DEPENDENCY_VERSION_STRATEGY: ${{ inputs.dependency-version-strategy }}
+        TAG_ONLY: ${{ inputs.tag-only }}
       run: |
         set -eo pipefail
+
+        # Tag-only release: create the tag/release with generated notes and no assets.
+        # SPM consumers resolve the git tag and build from source, so no XCFramework is
+        # attached. Idempotent: if the release already exists, leave it untouched.
+        if [ "$TAG_ONLY" = "true" ]; then
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release ${TAG} already exists; nothing to upload (tag-only). Leaving it as-is."
+          else
+            echo "Creating tag-only GitHub release ${TAG} (no assets)."
+            gh release create "$TAG" --generate-notes --title "v$TAG"
+          fi
+          exit 0
+        fi
 
         FILE_ARGS=""
 

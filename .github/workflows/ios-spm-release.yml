@@ -160,10 +160,6 @@ on:
         type: string
         default: 'git-describe'
 
-    secrets:
-      GITHUB_TOKEN:
-        required: false
-
 # Prevents two dispatches for the same tag from racing each other (e.g. duplicate/partial
 # releases from an accidental double-trigger). Scoped per-tag so unrelated releases in the
 # same repo can still run concurrently.

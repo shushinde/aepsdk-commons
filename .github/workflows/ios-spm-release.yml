@@ -51,7 +51,6 @@ on:
           **Example:** `"AEPServices, AEPCore"`
         type: string
         required: true
-        default: ''
 
       release-dependency-frameworks:
         description: |
@@ -183,7 +182,28 @@ jobs:
   preflight:
     name: Preflight checks
     runs-on: ubuntu-24.04
+    outputs:
+      source-sha: ${{ steps.source.outputs.sha }}
     steps:
+    - name: Checkout caller's exact source commit
+      uses: actions/checkout@v7.0.1
+      with:
+        ref: ${{ github.sha }}
+
+    - name: Resolve immutable release source
+      id: source
+      env:
+        CALLER_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        SOURCE_SHA=$(git rev-parse --verify 'HEAD^{commit}')
+        if [ "$SOURCE_SHA" != "$CALLER_SHA" ]; then
+          echo "::error title=Release source mismatch::Expected caller commit ${CALLER_SHA}, checked out ${SOURCE_SHA}."
+          exit 1
+        fi
+        echo "Release source: ${SOURCE_SHA}"
+        echo "sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+
     - name: Warn on inputs that will have no effect
       if: ${{ inputs.create-github-release == '' && inputs.release-dependency-frameworks != '' }}
       run: |
@@ -191,11 +211,12 @@ jobs:
 
   validate-versions:
     name: Validate Versions
-    uses: shushinde/aepsdk-commons/.github/workflows/versions.yml@main
+    needs: preflight
+    uses: ./.github/workflows/versions.yml
     with:
       name: ${{ inputs.version-validation-name }}
       version: ${{ inputs.tag }}
-      branch: main
+      branch: ${{ needs.preflight.outputs.source-sha }}
       paths: ${{ inputs.version-validation-paths }}
       dependencies: ${{ inputs.version-validation-dependencies }}
       update: false
@@ -203,12 +224,12 @@ jobs:
   release:
     name: Build and Release
     runs-on: ${{ inputs.runner-image }}
-    needs: validate-versions
+    needs: [preflight, validate-versions]
     if: ${{ inputs.create-github-release != '' }}
     steps:
     - uses: actions/checkout@v7.0.1
       with:
-        ref: main
+        ref: ${{ needs.preflight.outputs.source-sha }}
 
     - name: Set up Xcode Version
       uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
@@ -279,23 +300,77 @@ jobs:
         TAG: ${{ inputs.tag }}
         DEPENDENCY_VERSION_STRATEGY: ${{ inputs.dependency-version-strategy }}
         TAG_ONLY: ${{ inputs.tag-only }}
+        SOURCE_SHA: ${{ needs.preflight.outputs.source-sha }}
       run: |
-        set -eo pipefail
+        set -euo pipefail
+
+        if [ "$(git rev-parse --verify 'HEAD^{commit}')" != "$SOURCE_SHA" ]; then
+          echo "::error title=Release source mismatch::The build checkout no longer matches selected source ${SOURCE_SHA}."
+          exit 1
+        fi
+        if ! git check-ref-format "refs/tags/$TAG"; then
+          echo "::error title=Invalid release tag::'${TAG}' is not a valid Git tag name."
+          exit 1
+        fi
+
+        release_response=$(mktemp)
+        release_error=$(mktemp)
+        trap 'rm -f "$release_response" "$release_error"' EXIT
+        tag_path=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["TAG"], safe=""))')
+
+        check_publish_destination() {
+          local refs status tag_sha
+          TAG_EXISTS=false
+          RELEASE_EXISTS=false
+          # --exit-code distinguishes an absent tag (2) from a failed remote lookup.
+          if refs=$(git ls-remote --exit-code --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}"); then
+            TAG_EXISTS=true
+            # Annotated tags advertise a peeled ^{} entry; lightweight tags do not.
+            tag_sha=$(printf '%s\n' "$refs" | awk -v tag="refs/tags/$TAG" '
+              $2 == tag { direct = $1 }
+              $2 == tag "^{}" { peeled = $1 }
+              END { print (peeled != "" ? peeled : direct) }')
+            if [ "$tag_sha" != "$SOURCE_SHA" ]; then
+              echo "::error title=Release tag/source mismatch::Tag '${TAG}' points to ${tag_sha}, but selected source is ${SOURCE_SHA}. Refusing to publish or replace assets; the existing tag/release requires a separate decision."
+              exit 1
+            fi
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              echo "::error title=Tag lookup failed::Unable to verify remote tag '${TAG}' (exit ${status})."
+              exit "$status"
+            fi
+          fi
+
+          if gh api --include "repos/${GITHUB_REPOSITORY}/releases/tags/${tag_path}" >"$release_response" 2>"$release_error"; then
+            RELEASE_EXISTS=true
+            if [ "$TAG_EXISTS" != true ]; then
+              echo "::error title=Release tag missing::Release '${TAG}' exists without a verifiable remote tag. Refusing to publish or replace assets."
+              exit 1
+            fi
+          elif ! head -n 1 "$release_response" | grep -qE '^HTTP/[0-9.]+ 404( |$)'; then
+            cat "$release_error" >&2
+            echo "::error title=Release lookup failed::Unable to determine whether release '${TAG}' exists."
+            exit 1
+          fi
+        }
+
+        check_publish_destination
 
         # Tag-only release: create the tag/release with generated notes and no assets.
         # SPM consumers resolve the git tag and build from source, so no XCFramework is
         # attached. Idempotent: if the release already exists, leave it untouched.
         if [ "$TAG_ONLY" = "true" ]; then
-          if gh release view "$TAG" > /dev/null 2>&1; then
+          if [ "$RELEASE_EXISTS" = true ]; then
             echo "Release ${TAG} already exists; nothing to upload (tag-only). Leaving it as-is."
           else
             echo "Creating tag-only GitHub release ${TAG} (no assets)."
-            gh release create "$TAG" --generate-notes --title "v$TAG"
+            gh release create "$TAG" --target "$SOURCE_SHA" --generate-notes --title "v$TAG"
           fi
           exit 0
         fi
 
-        FILE_ARGS=""
+        FILE_ARGS=()
 
         # Verify every artifact we're about to attach was actually produced by `make zip`,
         # so a silent build gap fails loudly here instead of surfacing as a confusing
@@ -314,7 +389,7 @@ jobs:
           [ -z "$LIB" ] && continue
           ARTIFACT="./build/${LIB}.xcframework.zip"
           require_artifact "$ARTIFACT"
-          FILE_ARGS="$FILE_ARGS ${ARTIFACT}#${LIB}-${TAG}.xcframework.zip"
+          FILE_ARGS+=("${ARTIFACT}#${LIB}-${TAG}.xcframework.zip")
         done
 
         if [ -n "${RELEASE_DEPENDENCY_FRAMEWORKS}" ]; then
@@ -371,25 +446,26 @@ jobs:
             echo "Resolved ${DEP} to version ${DEP_VERSION}"
             ARTIFACT="./build/${DEP}.xcframework.zip"
             require_artifact "$ARTIFACT"
-            FILE_ARGS="$FILE_ARGS ${ARTIFACT}#${DEP}-${DEP_VERSION}.xcframework.zip"
+            FILE_ARGS+=("${ARTIFACT}#${DEP}-${DEP_VERSION}.xcframework.zip")
           done
         fi
 
-        if [ -z "$FILE_ARGS" ]; then
+        if [ "${#FILE_ARGS[@]}" -eq 0 ]; then
           echo "::error title=No release assets::No artifacts were resolved to attach to the release. Check 'create-github-release' and 'release-dependency-frameworks' inputs."
           exit 1
         fi
 
-        # Re-running after a partial failure (e.g. release created but an asset upload failed)
-        # would otherwise hard-fail here since the release/tag already exists. Fall back to
-        # uploading assets to the existing release with --clobber instead of erroring out.
-        if gh release view "$TAG" > /dev/null 2>&1; then
+        # Recheck after asset resolution, immediately before any create/upload operation.
+        # Partial releases may replace assets only when their tag matches this source.
+        check_publish_destination
+        if [ "$RELEASE_EXISTS" = true ]; then
           echo "Release ${TAG} already exists; uploading assets with --clobber instead of creating it fresh."
-          gh release upload "$TAG" $FILE_ARGS --clobber
+          gh release upload "$TAG" "${FILE_ARGS[@]}" --clobber
         else
-          echo "Creating GitHub release ${TAG} with assets:${FILE_ARGS}"
+          echo "Creating GitHub release ${TAG} with assets: ${FILE_ARGS[*]}"
           gh release create "$TAG" \
+            --target "$SOURCE_SHA" \
             --generate-notes \
             --title "v$TAG" \
-            $FILE_ARGS
+            "${FILE_ARGS[@]}"
         fi

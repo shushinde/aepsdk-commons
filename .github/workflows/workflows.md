@@ -20,6 +20,7 @@ This document covers how to use the workflows in Commons, and explains their req
     - [Secrets required](#secrets-required-1)
     - [Makefile requirements](#makefile-requirements-1)
 - [iOS workflows](#ios-workflows)
+  - [iOS SPM release (ios-spm-release.yml)](#ios-spm-release-ios-spm-releaseyml)
   - [iOS release (ios-release.yml)](#ios-release-ios-releaseyml)
     - [Secrets required](#secrets-required-2)
     - [Makefile requirements](#makefile-requirements-2)
@@ -55,6 +56,10 @@ Refer to the [GitHub documentation on evaluating expressions](https://docs.githu
 # General workflows
 
 ## Versions – update or validate (versions.yml)  
+
+For validation (`update: false`), `branch` accepts a branch, tag, or commit SHA.
+Release workflows pass an immutable source SHA. For updates (`update: true`),
+`branch` must remain the target branch for the generated pull request.
 
 The update action automatically creates a pull request (PR), which requires the following GitHub repository settings:  
 
@@ -131,6 +136,68 @@ The Makefile in the caller repository must include the following rules:
     - Example: `core-publish-snapshot`, `signal-publish-snapshot`  
 
 # iOS workflows
+
+## iOS SPM release (ios-spm-release.yml)
+
+The release source is the caller's exact `github.sha`, including when a manual
+dispatch selects a feature branch. Preflight resolves and records that commit;
+version validation, SPM integration, XCFramework archives/ZIPs, and release/tag
+creation all use the same SHA. There is no source-ref override: select the desired
+branch in the caller's dispatch UI. The ref after `uses: ...@` selects **workflow
+code**, not the caller repository's release source. The nested `versions.yml`
+workflow uses the same Commons revision as `ios-spm-release.yml`.
+
+Every `gh release create` explicitly targets the selected SHA. Before publishing,
+the workflow checks the remote tag's commit, peeling annotated tags. A matching
+existing release can receive binary assets with `--clobber`; a matching tag-only
+release is left untouched. A mismatched tag, a release without a verifiable tag,
+or a failed remote/API lookup stops publishing. The workflow never moves or
+deletes existing tags. This also applies to tags that exist without a release.
+Per-tag concurrency serializes this workflow's dispatches; external publishers
+must not move tags during a run.
+
+Caller example (binary release):
+
+```yaml
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version to release
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  release:
+    uses: shushinde/aepsdk-commons/.github/workflows/ios-spm-release.yml@main
+    with:
+      tag: ${{ inputs.tag }}
+      create-github-release: AEPEdge
+      version-validation-paths: AEPEdge.xcodeproj/project.pbxproj, Sources/EdgeConstants.swift
+      xcode-version: '26.3.0'
+      simulator-platforms: 'iOS, tvOS'
+    secrets: inherit
+```
+
+Pin `@main` to a reviewed Commons commit SHA for immutable workflow code. Do not
+pass `github.ref_name` as a validation ref; the reusable release workflow passes
+the selected SHA automatically. Only list files that declare a matchable extension
+version in `version-validation-paths`; a pure-SPM `Package.swift` usually declares
+dependency versions, not the extension's own version.
+
+For a source-only release, use the same caller with `tag-only: true`.
+`create-github-release` must still be non-empty. This skips archives, ZIPs, and all
+binary/dependency asset publishing. Set `run-spm-integration-test: false` only if
+the package has no integration target. Leaving `create-github-release` empty runs
+preflight/version validation without publishing.
+
+Binary releases retain `make archive` and `make zip`, with assets named
+`./build/<Extension>.xcframework.zip#<Extension>-<tag>.xcframework.zip`.
+`release-dependency-frameworks` remains supported, with dependency versions read
+using `dependency-version-strategy` (`git-describe` or `package-resolved`).
+Integration uses `make test-SPM-integration` by default.
 
 ## iOS release (ios-release.yml)
 

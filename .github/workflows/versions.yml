@@ -41,8 +41,11 @@ on:
 
       branch:
         description: |
-          The target branch used for both version validation and updates. 
-          For the update action, this is also the branch into which the pull request will be merged.
+          The checkout ref for validation: a branch, tag, or immutable commit SHA.
+          Release callers pass their selected source SHA so validation checks exactly
+          the source that will be built and tagged.
+          For the update action, this must be a branch and is also the branch into
+          which the pull request will be merged.
         type: string
         required: true
 
